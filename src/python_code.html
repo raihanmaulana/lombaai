@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Python Page</title>
+    <script
+      type="text/javascript"
+      src="https://cdn.jsdelivr.net/pyodide/v0.18.1/full/pyodide.js"
+    ></script>
+  </head>
+  <body>
+    <script>
+            async function runPythonCode() {
+              // Inisialisasi Pyodide
+              await languagePluginLoader;
+
+              // Kodingan Python yang akan dijalankan
+              const pythonCode =
+              print("initialize ... ")
+      import tensorflow as tf
+      import cv2
+      import numpy as np
+      import os
+      import math
+      import matplotlib.pyplot as plt
+      from PIL import Image
+
+      from scipy.optimize import curve_fit
+      from sklearn.cluster import KMeans
+
+
+      # Parameter
+      model_path = os.path.join("model", "road-detect-02.h5")
+      video_input_path = "footage\\target.mp4"
+      video_output_path = 'output_video.mp4'
+
+
+      # Metric Function
+      class MaxMeanIoU(tf.keras.metrics.MeanIoU):
+          def update_state(self, y_true, y_pred, sample_weight=None):
+              return super().update_state(tf.argmax(y_true, axis=-1), tf.argmax(y_pred, axis=-1), sample_weight)
+
+      # Loss Function
+      def dice_loss(y_true, y_pred, num_classes=2):
+          smooth=tf.keras.backend.epsilon()
+          dice=0
+          for index in range(num_classes):
+              y_true_f = tf.keras.backend.flatten(y_true[:,:,:,index])
+              y_pred_f = tf.keras.backend.flatten(y_pred[:,:,:,index])
+              intersection = tf.keras.backend.sum(y_true_f * y_pred_f)
+              union = tf.keras.backend.sum(y_true_f) + tf.keras.backend.sum(y_pred_f)
+              dice += (intersection + smooth) / (union + smooth)
+          return -2./num_classes * dice
+
+      def fill_image(frame, size):
+          new_size = (size, size)
+          # Load the 1280x720 image
+          image_src = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+          # image_src = Image.open(img_src)  # Replace with your image file path
+
+          # check the short dimension
+          if image_src.size[0] < image_src.size[1]:
+              dim_len = image_src.size[1]
+          else:
+              dim_len = image_src.size[0]
+
+          # Create a blank green dim_len X dim_len image
+          width, height = dim_len, dim_len
+          green_image = Image.new("RGB", (width, height), "green")
+
+          # Calculate the position to paste the 1280x720 image in the center
+          x_offset = (width - image_src.width) // 2
+          y_offset = (height - image_src.height) // 2
+
+          # Paste the 1280x720 image onto the green image
+          green_image.paste(image_src, (x_offset, y_offset))
+
+          # Resize the combined image to 128x128
+          resized_image = green_image.resize(new_size)
+          resized_image = np.array(resized_image)
+
+          # Save the final 128x128 image
+          # plt.imshow(resized_image)
+          # resized_image.save("final_image.jpg")  # Replace with your desired file path
+
+          return resized_image
+
+
+      # Load model
+      model = tf.keras.models.load_model(model_path, custom_objects={'dice_loss': dice_loss, 'MaxMeanIoU': MaxMeanIoU})
+
+      image_size = (128, 128)
+
+      # Open the video file
+      cap = cv2.VideoCapture(video_input_path)  # Replace with your video file path
+
+      # Get video frame dimensions
+      frame_width = int(cap.get(3))
+      frame_height = int(cap.get(4))
+
+      # Define the codec and create a VideoWriter object to save the output video
+      output = cv2.VideoWriter(video_output_path, cv2.VideoWriter_fourcc(*'mp4v'), 24, (frame_width, frame_height))
+
+      # List of Cropped Frame
+      cropped_frames_list = []
+
+      while True:
+          # Read a frame from the video
+          ret, frame = cap.read()
+
+          if not ret:
+              break  # End of video
+
+          frame_ori = frame.copy()
+          original_size = frame_ori.shape
+
+          # Perform any necessary preprocessing on the frame (e.g., resizing, normalizing)
+          frame = fill_image(frame, image_size[0])
+
+          frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+          frame = cv2.normalize(frame, None, 0, 1, cv2.NORM_MINMAX, cv2.CV_32F)
+
+          # Predict mask
+          pred = model.predict(np.expand_dims(frame, 0))
+
+          # Process mask
+          mask = pred.squeeze()
+          mask = np.stack((mask,)*3, axis=-1)
+          mask[mask >= 0.5] = 255
+          mask[mask < 0.5] = 0
+
+          mask_land = mask[:, :, 1]
+          mask_sky = mask[:, :, 0]
+
+          # Define the new width or height (whichever dimension you want to resize)
+          new_width = original_size[1]  # Set to your desired width
+          new_height = int(mask_land.shape[0] * (new_width / mask_land.shape[1]))  # Calculate new height
+
+          # Resize the image while maintaining the aspect ratio
+          resized_image = cv2.resize(mask_land, (new_width, new_height))
+
+          new_height = original_size[0]
+
+          # Calculate the cropping values for the top and bottom
+          height_diff = resized_image.shape[0] - new_height
+          top_crop = height_diff // 2  # Crop from the top
+          bottom_crop = height_diff - top_crop  # Crop from the bottom
+
+          # Crop the image vertically
+          cropped_image = resized_image[top_crop:top_crop + new_height, :]
+
+          # Step 1: Scale the mask image values to the range [0, 255]
+          scaled_mask_image = cropped_image.astype(np.uint8)
+
+          # Define a kernel for dilation
+          kernel_size = 40  # Adjust the kernel size as needed
+          kernel = np.ones((kernel_size, kernel_size), np.uint8)
+
+          # Perform dilation
+          scaled_mask_image = cv2.dilate(scaled_mask_image, kernel, iterations=1)
+
+          blurred = cv2.GaussianBlur(scaled_mask_image, (15, 15), 0)
+
+          # Step 3: Apply Canny edge detection to the converted mask image
+          edges = cv2.Canny(blurred, threshold1=100, threshold2=200)  # Adjust thresholds as needed
+
+          # Step 2: Create a mask where edges are set to a value (e.g., 255)
+          edge_mask = cv2.merge((edges, edges, edges))  # Create an RGB mask
+          edge_mask = edge_mask.astype(np.uint8)  # Convert to float for overlaying
+
+          # Ensure that both frame_ori and binary_mask have the same data type (np.uint8)
+          frame_ori = frame_ori.astype(np.uint8)
+
+          # Apply the binary mask to frame_ori
+          cropped_frame = cv2.bitwise_and(frame_ori, scaled_mask_image)
+
+          cropped_frames_list.append(cropped_frame)
+
+          result_image = frame_ori.copy()
+
+          # Blur the image for better edge detection
+          img_blur = cv2.GaussianBlur(cropped_frame, (21,21), 0)
+
+          ratio = 3
+          threshold1 = 125
+          threshold2 = ratio * threshold1
+
+          img = cropped_frame.copy()
+
+          aperture_size = 5
+
+          # Canny Edge Detection
+          edges = cv2.Canny(image=img_blur, threshold1=threshold1, threshold2=threshold2,apertureSize=aperture_size) # Canny Edge Detection
+
+
+          # Perform Connected Components Analysis
+          num_labels, labels = cv2.connectedComponents(edges)
+
+          image = cropped_frame.copy()
+
+          # Find contours in the Canny edge-detected image
+          contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+          # Eliminate lines with a certain length
+          min_line_length = 200  # Set your minimum line length
+          filtered_contours = [contour for contour in contours if cv2.arcLength(contour, closed=True) < min_line_length]
+
+          # Combine filtered contours into one array
+          all_points = np.vstack([np.squeeze(contour) for contour in filtered_contours])
+
+          # Use k-means clustering to classify points into zones
+          num_zones = 4  # Adjust the number of zones as needed
+          criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
+          _, labels, centers = cv2.kmeans(all_points.astype(np.float32), num_zones, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+
+          # Create an empty image to draw the zones
+          zones_image = frame_ori.copy()
+
+          # # Draw closed lines for each zone
+          # for i in range(num_zones):
+          #     zone_points = all_points[labels.flatten() == i]
+          #     hull = cv2.convexHull(zone_points, returnPoints=True)
+          #     cv2.drawContours(zones_image, [hull], -1, 255, 2)
+
+          # Draw different colors for each zone
+          for i in range(num_zones):
+              zone_points = all_points[labels.flatten() == i]
+              color = np.random.randint(0, 255, size=(3,), dtype=np.uint8)
+              for point in zone_points:
+                  cv2.circle(zones_image, tuple(point), 2, tuple(color.tolist()), -1)
+
+          # Step 3: Overlay the edges onto frame_ori
+          alpha = 0.5  # Adjust the transparency (0.0 for fully transparent, 1.0 for fully opaque)
+          blend = cv2.addWeighted(zones_image, 1, edge_mask, alpha, 0)
+
+          # Convert the blend frame to 8-bit unsigned integer format
+          blend = blend.astype(np.uint8)
+
+          # Display mask_land in another window
+
+          cv2.imshow("cropped_frame", blend)
+
+          output.write(blend)
+
+          # Press 'q' to exit the loop
+          if cv2.waitKey(1) & 0xFF == ord('q'):
+              break
+
+      # Release video object
+      cap.release()
+      output.release()
+
+      # Close all OpenCV windows
+      cv2.destroyAllWindows()
+      ;
+
+              // Jalankan kodingan Python
+              pyodide.runPython(pythonCode);
+            }
+
+            // Panggil fungsi ketika halaman selesai dimuat
+            document.addEventListener("DOMContentLoaded", runPythonCode);
+    </script>
+  </body>
+</html>
